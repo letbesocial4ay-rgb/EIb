@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { NavLink, Link, useNavigate, useLocation } from "react-router-dom";
 import axios from "axios";
 import { LogOut } from "lucide-react";
@@ -7,10 +8,16 @@ import { API } from "../lib/session";
 export default function Shell({ children, session, setSession }) {
   const nav = useNavigate();
   const loc = useLocation();
+  const [condensed, setCondensed] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setCondensed(window.scrollY > 40);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
   const isMarketing = loc.pathname === "/" || loc.pathname === "/methodology" || loc.pathname === "/signup" || loc.pathname === "/login" || loc.pathname.startsWith("/shared/");
   return (
     <div className={`ax-shell ${isMarketing ? "shell-dark" : "shell-light"}`} data-testid="app-shell">
-      <header className="ax-topbar">
+      <header className={`ax-topbar ${condensed ? "condensed" : ""}`}>
         <Link to="/" className="ax-brand" data-testid="brand-home" data-cursor="hover">
           <Logo size={26} />
           <span className="brandword">
