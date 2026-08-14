@@ -35,6 +35,9 @@ export default function Shell({ children, session, setSession }) {
           </NavLink>
           {session ? (
             <>
+              <NavLink to="/home" className={({ isActive }) => (isActive ? "active" : "")} data-testid="nav-home" data-cursor="hover">
+                Home
+              </NavLink>
               <NavLink to="/dashboard" className={({ isActive }) => (isActive ? "active" : "")} data-testid="nav-dashboard" data-cursor="hover">
                 Workspace
               </NavLink>

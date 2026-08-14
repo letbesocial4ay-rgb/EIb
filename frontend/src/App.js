@@ -6,6 +6,7 @@ import AuthCallback from "./components/AuthCallback";
 import Landing from "./pages/Landing";
 import Auth from "./pages/Auth";
 import Dashboard from "./pages/Dashboard";
+import MyDashboard from "./pages/MyDashboard";
 import Methodology from "./pages/Methodology";
 import Reports from "./pages/Reports";
 import Batch from "./pages/Batch";
@@ -36,6 +37,7 @@ function AppRouter({ session, setSession }) {
         <Route path="/methodology" element={<Methodology />} />
         <Route path="/shared/:token" element={<SharedReport />} />
         <Route path="/dashboard" element={<Protected session={session}><Dashboard session={session} /></Protected>} />
+        <Route path="/home" element={<Protected session={session}><MyDashboard session={session} /></Protected>} />
         <Route path="/batch" element={<Protected session={session}><Batch session={session} /></Protected>} />
         <Route path="/reports" element={<Protected session={session}><Reports session={session} /></Protected>} />
         <Route path="*" element={<Navigate to="/" replace />} />

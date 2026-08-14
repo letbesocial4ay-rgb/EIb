@@ -432,6 +432,42 @@ async def save_report(data: SaveReport, user=Depends(auth_user)):
 async def reports(user=Depends(auth_user)):
     docs = await db.reports.find({"user_id":user["sub"]},{"_id":0}).sort("created_at",-1).to_list(50); return {"reports":docs}
 
+@router.patch("/v1/reports/{report_id}")
+async def update_report(report_id: str, patch: dict, user=Depends(auth_user)):
+    """Partial updates on a saved report — currently used for pinning + renaming."""
+    allowed = {}
+    if "pinned" in patch: allowed["pinned"] = bool(patch["pinned"])
+    if "label" in patch and isinstance(patch["label"], str): allowed["label"] = patch["label"][:80]
+    if not allowed: raise HTTPException(400, "No supported fields to update")
+    result = await db.reports.update_one({"id": report_id, "user_id": user["sub"]}, {"$set": allowed})
+    if not result.matched_count: raise HTTPException(404, "That report doesn't exist or isn't yours.")
+    return {"status": "updated", "changes": allowed}
+
+@router.delete("/v1/reports/{report_id}")
+async def delete_report(report_id: str, user=Depends(auth_user)):
+    result = await db.reports.delete_one({"id": report_id, "user_id": user["sub"]})
+    if not result.deleted_count: raise HTTPException(404, "That report doesn't exist or isn't yours.")
+    return {"status": "deleted"}
+
+@router.get("/v1/home/summary")
+async def home_summary(user=Depends(auth_user)):
+    """Roll-up numbers for the personal dashboard."""
+    cursor = db.reports.find({"user_id": user["sub"]}, {"_id": 0})
+    docs = await cursor.to_list(500)
+    total = len(docs)
+    saved_scores = [d["document_summary"]["overall_score"] for d in docs if d.get("document_summary", {}).get("overall_score") is not None]
+    shared = sum(1 for d in docs if d.get("share_token"))
+    pinned = sum(1 for d in docs if d.get("pinned"))
+    avg_score = round(sum(saved_scores) / len(saved_scores), 3) if saved_scores else 0.0
+    avg_auth = round(1 - avg_score, 3) if saved_scores else 0.0
+    return {
+        "total_reports": total,
+        "shared_count": shared,
+        "pinned_count": pinned,
+        "avg_score": avg_score,
+        "avg_authenticity": avg_auth,
+    }
+
 @router.post("/v1/reports/{report_id}/share")
 async def share_report(report_id: str, user=Depends(auth_user)):
     """Mint a public share token for one saved report. Only the report owner can share;
