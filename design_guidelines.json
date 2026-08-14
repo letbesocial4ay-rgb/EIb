@@ -1,0 +1,36 @@
+{
+  "app_type": "hybrid_fullstack dashboard + public product site",
+  "theme": "Editorial Academic Dark/Light Mode with Serif Artifacts",
+  "typography": {
+    "headings": "Playfair Display, serif",
+    "body": "Plus Jakarta Sans, sans-serif",
+    "mono": "JetBrains Mono, monospace"
+  },
+  "colors": {
+    "primary": "#1e293b",
+    "accent": "#6366f1",
+    "risk_high": "#ef4444",
+    "risk_medium": "#f59e0b",
+    "risk_low": "#10b981",
+    "surface": "#0f172a",
+    "card": "#1e293b",
+    "paper": "#f8fafc"
+  },
+  "visual_enhancers": {
+    "glassmorphism": "backdrop-blur-xl bg-slate-900/80 border border-slate-800",
+    "shadows": "shadow-2xl shadow-slate-950/50",
+    "borders": "border border-slate-800/80"
+  },
+  "component_path": "/app/frontend/src/components",
+  "image_urls": {
+    "parchment_texture": "https://images.unsplash.com/photo-1705837863332-7162639852d8",
+    "study_desk": "https://images.unsplash.com/photo-1654356709115-3f68998bead4"
+  },
+  "instructions_to_main_agent": "Ensure full implementation of EAIA Explainable AI Essay Auditor with FastAPI backend, deterministic scoring over Llama/GPT-2 token logprobs, GLTR evidence, spaCy syntax, cliché matcher, ESL safeguard toggle, PDF/JSON export, SSE streaming, methodology page, and secure report saving without raw essay retention.",
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": [
+    "Every interactive element must include data-testid",
+    "No universal transition:all",
+    "Clean serif typography for essay artifact, sans for UI",
+    "Dedicated risk color indicators with accessible non-color labels"
+  ]
+}

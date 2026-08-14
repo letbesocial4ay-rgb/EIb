@@ -1,0 +1,42 @@
+{
+  "summary": "EAIA full-stack e2e verified. 15/15 backend pytest cases pass (health, auth signup/login/duplicate/short-password, protected /v1/analyze, ESL toggle, too-short/too-long validation, SSE stream, reports auth+save+list, privacy check for whole-essay string). Frontend flows verified end-to-end via Playwright: landing -> signup -> dashboard -> load sample -> analyze -> heatmap (8 sentences) -> select sentence -> token ribbon renders -> ESL safeguard toggle switches state -> JSON export downloads eaia-analysis.json -> save summary shows 'Saved' -> reports page lists saved row -> logout redirects -> protected /dashboard redirects to /login. Methodology page renders methodology + dataset limitations sections. Mobile (390x844) layout is clean. Primary AI feature (deterministic evidence adapter) is NOT an external LLM/API; it is a rule-based signal engine per PRD ('meta-llama/Llama-3.2-1B -> GPT-2 fallback / deterministic evidence adapter'). Verdict: pass (deterministic evidence engine returns structured per-sentence output with token bins, reasons, and composition consistent with PRD).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/v1/reports (save)", "issue": "Saved report persists per-sentence 'text' (which can be concatenated to reconstruct the full essay). PRD/SRS states 'Saved reports containing summaries/scores/notes only, never raw essay text'. Frontend sends sentences with text; backend stores them verbatim. Consider redacting sentence.text before insert (e.g., store only sentence_id, score, classification, perplexity, reasons, esl_score) or replacing text with hash/preview."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_eaia_backend.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Fix privacy leakage in POST /api/v1/reports: strip or redact per-sentence 'text' before Mongo insert so raw essay content cannot be reconstructed from saved reports (PRD requirement). Consider that reports UI list only shows verdict/date/score/total_sentences, so sentence text is not needed for the list view."
+  ],
+  "critical_code_review_comments": [
+    "server.py: /v1/reports stores caller-supplied 'sentences' as-is including sentence.text, violating the PRD promise 'never raw essay text'. Server should enforce redaction rather than trusting the client.",
+    "server.py: JWT_SECRET defaults to secrets.token_hex(32) at import when unset; every backend restart invalidates all issued tokens. Consider requiring JWT_SECRET from env in production or persisting it.",
+    "App.js: entire app is a single 22-line minified file (~7KB). Splitting Auth/Dashboard/Reports/Methodology into modules would help maintainability but is not blocking.",
+    "Dashboard: no client-side guard against text >3000 words before POST; backend correctly returns 413 but user sees generic 'Analysis failed'. Could disable Analyze / show inline hint at 3000.",
+    "auth error response uses HTTPException detail which axios exposes as string; good. However signup validation error (short password) returns 422 with FastAPI's default array detail — UI shows generic 'Could not complete this request'. Consider mapping validation errors to friendlier text."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_eaia_backend.py"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "Ephemeral e2e users are created inline per test run (e.g. e2e_<timestamp>@example.com / TestPass1234!). None persisted in /app/memory/test_credentials.md.",
+  "seed_data_creation": "None; each test creates its own signup account.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend tests live at /app/backend/tests/test_eaia_backend.py and hit REACT_APP_BACKEND_URL. Public preview URL: https://essay-authenticity.preview.emergentagent.com. Primary open action item is redacting sentence.text before persisting reports. After the fix, re-run pytest and verify Mongo report docs cannot reconstruct >~40% of the essay by joining sentence.text.",
+  "ai_feature_verdicts": [
+    "essay analysis (deterministic evidence engine at /api/v1/analyze) - pass - evidence: HTTP 200, 8 sentences returned for 131-word sample, each with score/classification/perplexity/top10_ratio/tokens[bin]; verdict 'Predominantly Machine-Generated' overall_score 0.65; PRD explicitly describes this as deterministic adapter, not an external LLM - skill: none (no external LLM/audio/image provider used)",
+    "SSE streaming (/api/v1/analyze/stream) - pass - evidence: 200, content-type text/event-stream, received sentence_evaluated + analysis_complete events - skill: none"
+  ],
+  "rca_of_the_issue": "Privacy leak RCA: server.py line 164 inserts data.sentences unchanged; App.js Dashboard.save() sends sentences with .text field intact (only tokens stripped). Fix: in save_report handler, replace each sentence's text with a truncated hash/preview or drop it entirely; or make SaveReport.sentences a stricter Pydantic schema that whitelists non-text fields."
+}
