@@ -5,7 +5,7 @@ import Logo from "./Logo";
 export default function Shell({ children, session, setSession }) {
   const nav = useNavigate();
   const loc = useLocation();
-  const isMarketing = ["/", "/methodology", "/signup", "/login"].includes(loc.pathname);
+  const isMarketing = loc.pathname === "/" || loc.pathname === "/methodology" || loc.pathname === "/signup" || loc.pathname === "/login" || loc.pathname.startsWith("/shared/");
   return (
     <div className={`ax-shell ${isMarketing ? "shell-dark" : "shell-light"}`} data-testid="app-shell">
       <header className="ax-topbar">
@@ -24,6 +24,9 @@ export default function Shell({ children, session, setSession }) {
             <>
               <NavLink to="/dashboard" className={({ isActive }) => (isActive ? "active" : "")} data-testid="nav-dashboard" data-cursor="hover">
                 Workspace
+              </NavLink>
+              <NavLink to="/batch" className={({ isActive }) => (isActive ? "active" : "")} data-testid="nav-batch" data-cursor="hover">
+                Batch
               </NavLink>
               <NavLink to="/reports" className={({ isActive }) => (isActive ? "active" : "")} data-testid="nav-reports" data-cursor="hover">
                 Reports

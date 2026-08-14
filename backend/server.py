@@ -260,14 +260,40 @@ async def health():
 async def analyze(data: AnalysisRequest, user=Depends(auth_user)):
     started = datetime.now(timezone.utc); result = run_analysis(data.text, data.options); result["document_summary"]["execution_time_ms"] = int((datetime.now(timezone.utc)-started).total_seconds()*1000); result.pop("normalized_text", None); return result
 
-@router.get("/v1/analyze/stream")
-async def stream(text: str, esl: bool = True, user=Depends(auth_user)):
+@router.post("/v1/analyze/stream")
+async def stream(data: AnalysisRequest, user=Depends(auth_user)):
     async def events():
-        result = run_analysis(text, Options(esl_sensitivity_dampener=esl))
-        for s in result["sentences"]:
-            yield f"event: sentence_evaluated\ndata: {json.dumps({k:s[k] for k in ['sentence_id','score','text','classification']})}\n\n"; await asyncio.sleep(.03)
-        yield f"event: analysis_complete\ndata: {json.dumps({'document_summary': result['document_summary']})}\n\n"
-    return StreamingResponse(events(), media_type="text/event-stream")
+        text = normalize_text(data.text)
+        count = len(re.findall(r"\b\w+[’'\w-]*\b", text))
+        if count < 50:
+            yield f"event: analysis_error\ndata: {json.dumps({'detail': 'Essays need at least 50 words'})}\n\n"
+            return
+        if count > 3000:
+            yield f"event: analysis_error\ndata: {json.dumps({'detail': 'Essays must be 3,000 words or fewer'})}\n\n"
+            return
+        spans = list(re.finditer(r"[^.!?]+[.!?]+|[^.!?]+$", text))
+        sentences = []
+        started = datetime.now(timezone.utc)
+        for i, m in enumerate(spans):
+            piece = m.group().strip()
+            if not piece:
+                continue
+            s = analyze_sentence(piece, i, data.options.esl_sensitivity_dampener)
+            sentences.append(s)
+            payload = {k: s[k] for k in ("sentence_id", "score", "text", "classification", "perplexity", "top10_ratio", "esl_score")}
+            yield f"event: sentence_evaluated\ndata: {json.dumps(payload)}\n\n"
+            await asyncio.sleep(0)
+        # Reconstruct summary from streamed sentences (same math as run_analysis).
+        if sentences:
+            scores = [s["score"] for s in sentences]
+            top = sorted(scores, reverse=True)[:3]
+            overall = round(.6 * (sum(scores) / len(scores)) + .4 * (sum(top) / len(top)), 3)
+            verdict = "Predominantly Machine-Generated" if overall >= .62 else "Hybrid / Machine-Polished Text" if overall >= .42 else "Authentic Human Narrative"
+            summary = {"overall_score": overall, "verdict": verdict, "total_sentences": len(sentences), "execution_time_ms": int((datetime.now(timezone.utc) - started).total_seconds() * 1000)}
+        else:
+            summary = {"overall_score": 0.0, "verdict": "Insufficient text", "total_sentences": 0}
+        yield f"event: analysis_complete\ndata: {json.dumps({'document_summary': summary})}\n\n"
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
 @router.post("/v1/reports")
 async def save_report(data: SaveReport, user=Depends(auth_user)):
@@ -281,6 +307,38 @@ async def save_report(data: SaveReport, user=Depends(auth_user)):
 @router.get("/v1/reports")
 async def reports(user=Depends(auth_user)):
     docs = await db.reports.find({"user_id":user["sub"]},{"_id":0}).sort("created_at",-1).to_list(50); return {"reports":docs}
+
+@router.post("/v1/reports/{report_id}/share")
+async def share_report(report_id: str, user=Depends(auth_user)):
+    """Mint a public share token for one saved report. Only the report owner can share;
+    the shared payload still contains no essay text (that boundary is enforced at save-time)."""
+    report = await db.reports.find_one({"id": report_id, "user_id": user["sub"]})
+    if not report:
+        raise HTTPException(404, "That report doesn't exist or isn't yours to share.")
+    token = report.get("share_token") or secrets.token_urlsafe(16)
+    await db.reports.update_one(
+        {"id": report_id, "user_id": user["sub"]},
+        {"$set": {"share_token": token, "shared_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    return {"share_token": token, "share_path": f"/shared/{token}"}
+
+@router.delete("/v1/reports/{report_id}/share")
+async def unshare_report(report_id: str, user=Depends(auth_user)):
+    result = await db.reports.update_one(
+        {"id": report_id, "user_id": user["sub"]},
+        {"$unset": {"share_token": "", "shared_at": ""}},
+    )
+    if not result.matched_count:
+        raise HTTPException(404, "That report doesn't exist or isn't yours to unshare.")
+    return {"status": "revoked"}
+
+@router.get("/v1/shared/{token}")
+async def shared_report(token: str):
+    """Public read-only fetch of a shared evidence summary. Strips the owner id."""
+    doc = await db.reports.find_one({"share_token": token}, {"_id": 0, "user_id": 0, "share_token": 0})
+    if not doc:
+        raise HTTPException(404, "That share link is no longer active.")
+    return doc
 
 @router.post("/v1/ingest")
 async def ingest(file: UploadFile = File(...), user=Depends(auth_user)):

@@ -1,12 +1,12 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useDropzone } from "react-dropzone";
 import { motion } from "framer-motion";
-import { FileUp, ArrowRight, ShieldCheck, LockKeyhole, Braces, Sigma, Layers, Sparkles, ChevronDown } from "lucide-react";
+import { FileUp, ArrowRight, ShieldCheck, LockKeyhole, Braces, Sigma, Layers, Sparkles, ChevronDown, Radio } from "lucide-react";
 import axios from "axios";
 import Constellation from "../components/Constellation";
 import Logo from "../components/Logo";
-import { API } from "../lib/session";
+import { API, useSession } from "../lib/session";
 
 const CAPABILITIES = [
   { icon: Braces, title: "Raw logits, never verdicts", body: "The local causal LM only emits token log-probabilities. Every score is deterministic math your team can audit." },
@@ -50,38 +50,51 @@ function MagneticButton({ children, onClick, className = "", ...rest }) {
 }
 
 export default function Landing() {
-  const [uploadState, setUploadState] = useState({ status: "idle", filename: "", preview: null, error: "" });
+  const [session] = useSession();
+  const nav = useNavigate();
+  const [uploadState, setUploadState] = useState({ status: "idle", filename: "", preview: null, error: "", text: null });
   const [ingesting, setIngesting] = useState(false);
+  const [streamState, setStreamState] = useState({ streaming: false, sentences: [], summary: null, error: "" });
 
   const onDrop = useCallback(async (accepted, rejected) => {
     if (rejected && rejected.length) {
-      setUploadState({ status: "error", filename: "", preview: null, error: rejected[0].errors?.[0]?.message || "That file couldn't be read." });
+      setUploadState({ status: "error", filename: "", preview: null, error: rejected[0].errors?.[0]?.message || "That file couldn't be read.", text: null });
       return;
     }
     const file = accepted[0];
     if (!file) return;
     setIngesting(true);
-    setUploadState({ status: "reading", filename: file.name, preview: null, error: "" });
+    setUploadState({ status: "reading", filename: file.name, preview: null, error: "", text: null });
+    setStreamState({ streaming: false, sentences: [], summary: null, error: "" });
     try {
       const fd = new FormData();
       fd.append("file", file);
-      const r = await axios.post(`${API}/v1/ingest_preview`, fd);
-      setUploadState({
-        status: "ready",
-        filename: file.name,
-        preview: {
-          word_count: r.data.word_count,
-          excerpt: r.data.excerpt,
-          warning: r.data.warning,
-        },
-        error: "",
-      });
+      if (session) {
+        // Full ingest so we can stream a real analysis after.
+        const r = await axios.post(`${API}/v1/ingest`, fd, { headers: { Authorization: `Bearer ${session.token}` } });
+        setUploadState({
+          status: "ready",
+          filename: file.name,
+          preview: { word_count: r.data.word_count, excerpt: r.data.text.split(/\s+/).slice(0, 14).join(" ") + "…", warning: r.data.warning },
+          error: "",
+          text: r.data.text,
+        });
+      } else {
+        const r = await axios.post(`${API}/v1/ingest_preview`, fd);
+        setUploadState({
+          status: "ready",
+          filename: file.name,
+          preview: { word_count: r.data.word_count, excerpt: r.data.excerpt, warning: r.data.warning },
+          error: "",
+          text: null,
+        });
+      }
     } catch (x) {
-      setUploadState({ status: "error", filename: file.name, preview: null, error: x.response?.data?.detail || "This file couldn't be parsed. Try TXT/DOCX/PDF." });
+      setUploadState({ status: "error", filename: file.name, preview: null, error: x.response?.data?.detail || "This file couldn't be parsed.", text: null });
     } finally {
       setIngesting(false);
     }
-  }, []);
+  }, [session]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -94,6 +107,48 @@ export default function Landing() {
     maxSize: 5 * 1024 * 1024,
   });
 
+  const startLiveStream = async () => {
+    if (!session || !uploadState.text) return;
+    setStreamState({ streaming: true, sentences: [], summary: null, error: "" });
+    try {
+      const res = await fetch(`${API}/v1/analyze/stream`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.token}`,
+        },
+        body: JSON.stringify({ text: uploadState.text, options: { include_token_details: false, esl_sensitivity_dampener: true } }),
+      });
+      if (!res.body) throw new Error("Stream unavailable");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split(/\n\n/);
+        buf = parts.pop();
+        for (const chunk of parts) {
+          const evLine = chunk.split("\n").find((l) => l.startsWith("event:"));
+          const dataLine = chunk.split("\n").find((l) => l.startsWith("data:"));
+          if (!evLine || !dataLine) continue;
+          const evName = evLine.slice(6).trim();
+          const payload = JSON.parse(dataLine.slice(5).trim());
+          if (evName === "sentence_evaluated") {
+            setStreamState((prev) => ({ ...prev, sentences: [...prev.sentences, payload] }));
+          } else if (evName === "analysis_complete") {
+            setStreamState((prev) => ({ ...prev, streaming: false, summary: payload.document_summary }));
+          } else if (evName === "analysis_error") {
+            setStreamState((prev) => ({ ...prev, streaming: false, error: payload.detail }));
+          }
+        }
+      }
+    } catch (x) {
+      setStreamState((prev) => ({ ...prev, streaming: false, error: "Stream failed. Try the workspace." }));
+    }
+  };
+
   // Ripple parallax based on scroll — subtle motion on the marketing background.
   const [scroll, setScroll] = useState(0);
   useEffect(() => {
@@ -101,6 +156,8 @@ export default function Landing() {
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
+
+  const riskClass = (score) => (score >= 0.62 ? "soft-red" : score >= 0.42 ? "soft-amber" : "soft-green");
 
   return (
     <div className="landing-root">
@@ -208,9 +265,53 @@ export default function Landing() {
                   {uploadState.preview.word_count} words · excerpt: “{uploadState.preview.excerpt}”
                   {uploadState.preview.warning && <span className="dz-warn"> · {uploadState.preview.warning}</span>}
                 </p>
-                <Link to="/signup" className="dz-cta" data-testid="landing-dropzone-signup" data-cursor="hover">
-                  Sign in to analyze <ArrowRight size={14} />
-                </Link>
+                {session ? (
+                  streamState.streaming || streamState.sentences.length > 0 ? (
+                    <div className="dz-live" data-testid="landing-live-stream">
+                      <div className="dz-live-head">
+                        <span><Radio size={12} className="pulse" /> {streamState.streaming ? "Streaming evidence…" : "Live preview"}</span>
+                        {streamState.summary && (
+                          <b className={riskClass(streamState.summary.overall_score)} data-testid="landing-live-score">
+                            {streamState.summary.overall_score.toFixed(2)} · {streamState.summary.verdict}
+                          </b>
+                        )}
+                      </div>
+                      <div className="dz-live-list">
+                        {streamState.sentences.map((s) => (
+                          <div key={s.sentence_id} className={`dz-live-row ${riskClass(s.score)}`} data-testid={`landing-live-sentence-${s.sentence_id}`}>
+                            <span className="ix">{String(s.sentence_id + 1).padStart(2, "0")}</span>
+                            <span className="txt">{s.text.length > 100 ? s.text.slice(0, 100) + "…" : s.text}</span>
+                            <b>{s.score.toFixed(2)}</b>
+                          </div>
+                        ))}
+                      </div>
+                      {streamState.summary && (
+                        <button
+                          className="dz-cta"
+                          data-testid="landing-live-open-workspace"
+                          onClick={() => { sessionStorage.setItem("araxyss.pending_text", uploadState.text); nav("/dashboard"); }}
+                          data-cursor="hover"
+                        >
+                          Open full evidence <ArrowRight size={13} />
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <button
+                      className="dz-cta"
+                      data-testid="landing-live-start"
+                      onClick={startLiveStream}
+                      disabled={!uploadState.text}
+                      data-cursor="hover"
+                    >
+                      Stream live evidence <Radio size={13} />
+                    </button>
+                  )
+                ) : (
+                  <Link to="/signup" className="dz-cta" data-testid="landing-dropzone-signup" data-cursor="hover">
+                    Sign in to analyze <ArrowRight size={14} />
+                  </Link>
+                )}
               </>
             )}
             {uploadState.status === "error" && (

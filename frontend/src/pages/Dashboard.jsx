@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
 import {
   FileUp, BookOpen, ArrowRight, Download, Save, AlertTriangle, CheckCircle2,
-  XCircle, LockKeyhole, Sigma, Layers, Braces,
+  XCircle, LockKeyhole, Sigma, Layers, Braces, Share2, Copy,
 } from "lucide-react";
 import { API } from "../lib/session";
 
@@ -23,7 +23,7 @@ function Metric({ label, value, tone }) {
 }
 
 export default function Dashboard({ session }) {
-  const [text, setText] = useState("");
+  const [text, setText] = useState(() => sessionStorage.getItem("araxyss.pending_text") || "");
   const [result, setResult] = useState(null);
   const [selected, setSelected] = useState(0);
   const [esl, setEsl] = useState(true);
@@ -32,6 +32,9 @@ export default function Dashboard({ session }) {
   const [notes, setNotes] = useState({});
   const [overrides, setOverrides] = useState({});
   const [saved, setSaved] = useState(false);
+  const [savedReportId, setSavedReportId] = useState(null);
+  const [shareUrl, setShareUrl] = useState("");
+  useEffect(() => { sessionStorage.removeItem("araxyss.pending_text"); }, []);
   const s = result?.sentences?.[selected];
 
   const analyze = async () => {
@@ -60,7 +63,7 @@ export default function Dashboard({ session }) {
   };
 
   const save = async () => {
-    await axios.post(
+    const r = await axios.post(
       `${API}/v1/reports`,
       {
         document_summary: result.document_summary,
@@ -71,6 +74,19 @@ export default function Dashboard({ session }) {
       { headers: { Authorization: `Bearer ${session.token}` } }
     );
     setSaved(true);
+    setSavedReportId(r.data.id);
+  };
+
+  const shareSaved = async () => {
+    if (!savedReportId) return;
+    const r = await axios.post(
+      `${API}/v1/reports/${savedReportId}/share`,
+      {},
+      { headers: { Authorization: `Bearer ${session.token}` } }
+    );
+    const url = `${window.location.origin}${r.data.share_path}`;
+    setShareUrl(url);
+    try { await navigator.clipboard.writeText(url); } catch {}
   };
 
   const exportJson = () => {
@@ -332,6 +348,11 @@ export default function Dashboard({ session }) {
               <button className="btn-primary small" data-testid="save-report-button" onClick={save} data-cursor="hover">
                 <Save size={13} /> {saved ? "Saved" : "Save summary"}
               </button>
+              {saved && savedReportId && (
+                <button className="btn-ghost small" data-testid="dashboard-share-button" onClick={shareSaved} data-cursor="hover">
+                  {shareUrl ? <><Copy size={12} /> Link copied</> : <><Share2 size={12} /> Share</>}
+                </button>
+              )}
               <button className="btn-ghost small" data-testid="export-json-button" onClick={exportJson} data-cursor="hover">
                 <Download size={13} /> JSON
               </button>
@@ -339,6 +360,12 @@ export default function Dashboard({ session }) {
                 <Download size={13} /> PDF
               </button>
             </div>
+            {shareUrl && (
+              <div className="share-strip" data-testid="dashboard-share-strip">
+                <span>Share link (copied)</span>
+                <input readOnly value={shareUrl} onFocus={(e) => e.target.select()} />
+              </div>
+            )}
           </aside>
         </div>
       )}
