@@ -1,14 +1,18 @@
 import { useEffect, useState } from "react";
 import { NavLink, Link, useNavigate, useLocation } from "react-router-dom";
 import axios from "axios";
-import { LogOut } from "lucide-react";
+import { LogOut, Settings } from "lucide-react";
 import Logo from "./Logo";
 import { API } from "../lib/session";
+import PreferencesModal from "./PreferencesModal";
+import { applyToDocument } from "../lib/preferences";
 
 export default function Shell({ children, session, setSession }) {
   const nav = useNavigate();
   const loc = useLocation();
   const [condensed, setCondensed] = useState(false);
+  const [prefsOpen, setPrefsOpen] = useState(false);
+  useEffect(() => { applyToDocument(); }, []);
   useEffect(() => {
     const onScroll = () => setCondensed(window.scrollY > 40);
     window.addEventListener("scroll", onScroll, { passive: true });
@@ -63,9 +67,19 @@ export default function Shell({ children, session, setSession }) {
               Get access
             </Link>
           )}
+          <button
+            className="ax-icon-btn"
+            onClick={() => setPrefsOpen(true)}
+            aria-label="Preferences"
+            data-testid="open-preferences-button"
+            data-cursor="hover"
+          >
+            <Settings size={14} />
+          </button>
         </nav>
       </header>
       <main className="ax-main">{children}</main>
+      <PreferencesModal open={prefsOpen} onClose={() => setPrefsOpen(false)} session={session} />
     </div>
   );
 }

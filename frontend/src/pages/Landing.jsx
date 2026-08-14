@@ -4,7 +4,7 @@ import { useDropzone } from "react-dropzone";
 import { motion } from "framer-motion";
 import {
   FileUp, ArrowRight, ShieldCheck, LockKeyhole, Braces, Sigma, Layers, Sparkles,
-  ChevronDown, Radio, Zap, Eye, Users, Star,
+  ChevronDown, Radio, Zap, Eye, Users, Star, AlertTriangle,
 } from "lucide-react";
 import axios from "axios";
 import Logo from "../components/Logo";
@@ -13,7 +13,6 @@ import TiltCard from "../components/TiltCard";
 import RadialGauge from "../components/RadialGauge";
 import ScanLoader from "../components/ScanLoader";
 import { API, useSession } from "../lib/session";
-
 // Lazy-load the 3D scene so the first paint is fast and mobile devices can skip it.
 const HeroShield = lazy(() => import("../components/HeroShield"));
 
@@ -162,8 +161,44 @@ export default function Landing() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
+  // Public testimonials (with user-submitted content on top of the built-in list).
+  const [remoteTestimonials, setRemoteTestimonials] = useState([]);
+  const [submit, setSubmit] = useState({ open: false, sent: false, error: "", quote: "", institution: "", role: "" });
+  const [subBusy, setSubBusy] = useState(false);
+  useEffect(() => {
+    axios.get(`${API}/v1/testimonials`).then((r) => setRemoteTestimonials(r.data.testimonials || [])).catch(() => {});
+  }, [submit.sent]);
+  const submitTestimonial = async (e) => {
+    e.preventDefault();
+    setSubBusy(true);
+    try {
+      await axios.post(`${API}/v1/testimonials`, {
+        quote: submit.quote, institution: submit.institution, role: submit.role || undefined,
+      }, {
+        headers: session?.token ? { Authorization: `Bearer ${session.token}` } : {},
+        withCredentials: true,
+      });
+      setSubmit({ open: false, sent: true, error: "", quote: "", institution: "", role: "" });
+    } catch (x) {
+      setSubmit({ ...submit, error: x.response?.data?.detail || "Please sign in and try again." });
+    } finally { setSubBusy(false); }
+  };
+  const allTestimonials = [
+    ...remoteTestimonials.map((t) => ({ quote: t.quote, who: `${t.role || "Reviewer"} · ${t.institution}` })),
+    ...TESTIMONIALS,
+  ].slice(0, 6);
+
   const riskClass = (score) => (score >= 0.62 ? "soft-red" : score >= 0.42 ? "soft-amber" : "soft-green");
-  const authenticity = streamState.summary ? 1 - streamState.summary.overall_score : 0.72;
+  // Running document mean while streaming, so the reviewer sees the dial fill in real time.
+  const streamMean = streamState.sentences.length
+    ? streamState.sentences.reduce((s, x) => s + x.score, 0) / streamState.sentences.length
+    : null;
+  const liveAuth = streamState.summary
+    ? 1 - streamState.summary.overall_score
+    : streamMean !== null
+    ? 1 - streamMean
+    : 0.72;
+  const authenticity = liveAuth;
 
   return (
     <div className="landing-root landing-v2">
@@ -392,7 +427,7 @@ export default function Landing() {
           </div>
         </div>
         <div className="testimonial-grid">
-          {TESTIMONIALS.map((t, i) => (
+          {allTestimonials.map((t, i) => (
             <motion.div key={i} initial="hidden" whileInView="visible" viewport={{ once: true, margin: "-40px" }} variants={revealVariants} custom={i}>
               <TiltCard className="testimonial-card" intensity={4}>
                 <div className="testimonial-stars"><Star size={12} /><Star size={12} /><Star size={12} /><Star size={12} /><Star size={12} /></div>
@@ -401,6 +436,42 @@ export default function Landing() {
               </TiltCard>
             </motion.div>
           ))}
+        </div>
+        <div className="testimonial-submit-row">
+          {submit.sent ? (
+            <div className="testimonial-thanks" data-testid="testimonial-thanks">Thanks — your quote is live in the marquee above.</div>
+          ) : submit.open ? (
+            <form className="testimonial-form" onSubmit={submitTestimonial} data-testid="testimonial-form">
+              <label>
+                <span>Your quote</span>
+                <textarea
+                  required minLength={20} maxLength={400}
+                  placeholder="What changed in your admissions committee?"
+                  value={submit.quote} onChange={(e) => setSubmit({ ...submit, quote: e.target.value })}
+                  data-testid="testimonial-quote"
+                />
+              </label>
+              <div className="testimonial-form-row">
+                <label><span>Institution</span>
+                  <input required minLength={2} maxLength={80} value={submit.institution} onChange={(e) => setSubmit({ ...submit, institution: e.target.value })} data-testid="testimonial-institution" />
+                </label>
+                <label><span>Role (optional)</span>
+                  <input maxLength={80} value={submit.role} onChange={(e) => setSubmit({ ...submit, role: e.target.value })} placeholder="Dean of Admissions" data-testid="testimonial-role" />
+                </label>
+              </div>
+              {submit.error && <div className="error-box"><AlertTriangle size={13} /> {submit.error}</div>}
+              <div className="testimonial-form-actions">
+                <button type="button" className="btn-ghost-v2 small" onClick={() => setSubmit({ ...submit, open: false })} data-cursor="hover">Cancel</button>
+                <button type="submit" className="btn-gradient" disabled={subBusy} data-testid="testimonial-submit" data-cursor="hover">
+                  {subBusy ? "Sending…" : session ? "Publish quote" : "Sign in to publish"} <ArrowRight size={14} />
+                </button>
+              </div>
+            </form>
+          ) : (
+            <button className="btn-ghost-v2" onClick={() => setSubmit({ ...submit, open: true, error: "" })} data-testid="testimonial-open-form" data-cursor="hover">
+              Share how your committee uses Araxyss <ArrowRight size={14} />
+            </button>
+          )}
         </div>
       </section>
 

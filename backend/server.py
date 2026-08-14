@@ -196,6 +196,33 @@ async def logout(request: Request, response: Response):
     response.delete_cookie("session_token", path="/")
     return {"status": "logged_out"}
 
+class TestimonialSubmit(BaseModel):
+    quote: str = Field(min_length=20, max_length=400)
+    institution: str = Field(min_length=2, max_length=80)
+    role: Optional[str] = Field(default=None, max_length=80)
+
+@router.post("/v1/testimonials")
+async def submit_testimonial(data: TestimonialSubmit, user=Depends(auth_user)):
+    """Admissions teams submit their own quotes. Auto-approved for MVP; a moderation
+    dashboard can flip `approved=False` later without changing the read path."""
+    doc = {
+        "id": str(uuid.uuid4()),
+        "quote": data.quote.strip(),
+        "institution": data.institution.strip(),
+        "role": (data.role or "").strip() or "Committee reviewer",
+        "author_name": user.get("name") or "Anonymous reviewer",
+        "author_id": user["sub"],
+        "approved": True,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.testimonials.insert_one(doc)
+    return {"status": "accepted", "id": doc["id"]}
+
+@router.get("/v1/testimonials")
+async def list_testimonials():
+    docs = await db.testimonials.find({"approved": True}, {"_id": 0, "author_id": 0}).sort("created_at", -1).to_list(24)
+    return {"testimonials": docs}
+
 CLICHES = ["navigate the intricate complexities of", "profound testament to", "in today's fast-paced world", "has taught me that", "journey of self-discovery", "made me who I am today", "at the end of the day", "ever-changing landscape"]
 TRANSITIONS = {"furthermore", "moreover", "in conclusion", "on the other hand", "firstly", "secondly", "therefore", "consequently", "in addition"}
 
