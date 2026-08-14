@@ -25,7 +25,7 @@ DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_hex(32))
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
-app = FastAPI(title="EAIA Explainable Essay Auditor")
+app = FastAPI(title="Araxyss Explainable Essay Auditor")
 router = APIRouter(prefix="/api")
 logger = logging.getLogger("eaia")
 local_model = load_local_model()
@@ -55,6 +55,10 @@ class SaveReport(BaseModel):
     sentences: list[dict]
     reviewer_notes: dict = {}
     reviewer_overrides: dict = {}
+
+class ExportRequest(AnalysisRequest):
+    reviewer_overrides: dict = {}
+    reviewer_notes: dict = {}
 
 def token_parts(text: str):
     return re.findall(r"\b[\w’'-]+\b|[^\w\s]", text)
@@ -118,7 +122,42 @@ def _sentence_signals_from_model(rows):
     ppl = round(min(400, math.exp(min(6.5, mean_nll))), 2)
     top10 = round(sum(1 for r in rows if r["rank"] <= 10) / n, 3)
     top100 = round(sum(1 for r in rows if r["rank"] <= 100) / n, 3)
-    return {"perplexity": ppl, "top10_ratio": top10, "top100_ratio": top100}
+    # Per-token Shannon entropy over the top-3 alternatives (bounded proxy — the full
+    # softmax entropy over 50k tokens is expensive; the top-3 tail is a stable summary).
+    entropies = []
+    for r in rows:
+        probs = [max(1e-6, a.get("prob", 0)) for a in r.get("alternatives", [])]
+        total = sum(probs) or 1
+        norm = [p / total for p in probs]
+        entropies.append(-sum(p * math.log(p) for p in norm))
+    mean_entropy = round(sum(entropies) / max(1, len(entropies)), 3) if entropies else 0.0
+    return {"perplexity": ppl, "top10_ratio": top10, "top100_ratio": top100, "entropy": mean_entropy}
+
+def _mattr(text, window=50):
+    """Moving-Average Type-Token Ratio — vocabulary monotony under a fixed window."""
+    tokens = re.findall(r"[A-Za-z][A-Za-z'-]*", text.lower())
+    if len(tokens) < window:
+        return round(len(set(tokens)) / max(1, len(tokens)), 3)
+    ratios = []
+    for i in range(len(tokens) - window + 1):
+        chunk = tokens[i:i + window]
+        ratios.append(len(set(chunk)) / window)
+    return round(sum(ratios) / len(ratios), 3)
+
+def _agentless_passive(text):
+    """Heuristic agentless-passive count: 'was <past-participle>' with no 'by' agent."""
+    lowered = text.lower()
+    passives = re.findall(r"\b(?:was|were|is|are|been|being)\s+\w+ed\b", lowered)
+    by_agents = re.findall(r"\bby\s+\w+\b", lowered)
+    return max(0, len(passives) - len(by_agents))
+
+def _feature_vector(s):
+    """Feature vector for style-boundary Δ computation."""
+    return (
+        min(1, s["perplexity"] / 60),
+        s["top10_ratio"],
+        min(1, s["syntactic_depth"] / 10),
+    )
 
 def analyze_sentence(text, idx, damp=True):
     words = re.findall(r"[A-Za-z][A-Za-z'-]*", text)
@@ -137,10 +176,14 @@ def analyze_sentence(text, idx, damp=True):
         ppl = real_signals["perplexity"]
         top10 = real_signals["top10_ratio"]
         top100 = real_signals["top100_ratio"]
+        entropy = real_signals["entropy"]
     else:
         ppl = round(max(9, 52 - unique * 28 - min(10, punct * 1.5) + (length % 7)), 2)
         top10 = round(max(.04, min(.82, .82 - ppl / 90 + unique * .12)), 3)
         top100 = round(min(1, top10 + .24), 3)
+        entropy = round(max(0.3, min(2.5, 2.5 - top10 * 1.8)), 3)
+    mattr = _mattr(text)
+    agentless = _agentless_passive(text)
     c_syn = min(1, len(matches) * .35 + (0.2 if formulaic > .4 else 0))
     raw = sigmoid(2.5 * (1 - min(ppl, 45) / 45) + 2.2 * top10 + 1.4 * c_syn - 1.85)
     adjusted = max(0, raw - (.28 if esl >= .6 else .28 * esl / .6) * esl) if damp else raw
@@ -152,6 +195,8 @@ def analyze_sentence(text, idx, damp=True):
     if matches: reasons.append(f"Cliché matcher found: {', '.join(matches)}")
     if depth > 5.5: reasons.append(f"Syntactic depth is {depth}, with layered clause structure")
     if esl >= .45: reasons.append(f"ESL safeguard detected formulaic connector/compression patterns (E={esl:.2f})")
+    if agentless >= 2: reasons.append(f"{agentless} agentless-passive clauses — a structural marker of formulaic prose")
+    if mattr < 0.55 and length > 12: reasons.append(f"Moving-average TTR is low ({mattr}), suggesting vocabulary monotony")
     if not reasons: reasons.append("Signals remain within the human-writing baseline; inspect the raw token evidence")
     if real_rows:
         toks = real_rows
@@ -161,7 +206,7 @@ def analyze_sentence(text, idx, damp=True):
             rank = 1 + ((len(tok) * 17 + n * 29 + length * 7) % 1600)
             bin_name = "green" if rank <= 10 else "yellow" if rank <= 100 else "red" if rank <= 1000 else "purple"
             toks.append({"token": tok, "token_id": 100 + (ord(tok[0]) if tok else 0), "log_prob": round(-math.log(max(.001, 1 / rank)), 3), "rank": rank, "bin": bin_name, "alternatives": [{"token": "the", "prob": .18}, {"token": "a", "prob": .11}, {"token": "this", "prob": .07}]})
-    return {"sentence_id": idx, "text": text, "score": score, "raw_score": round(raw, 3), "classification": classification, "perplexity": ppl, "top10_ratio": top10, "top100_ratio": top100, "syntactic_depth": depth, "flagged_markers": matches, "reasons": reasons, "esl_score": round(esl, 3), "tokens": toks, "signal_source": "local_logits" if real_signals else "deterministic_fallback"}
+    return {"sentence_id": idx, "text": text, "score": score, "raw_score": round(raw, 3), "classification": classification, "perplexity": ppl, "top10_ratio": top10, "top100_ratio": top100, "syntactic_depth": depth, "flagged_markers": matches, "reasons": reasons, "esl_score": round(esl, 3), "entropy": entropy, "mattr": mattr, "agentless_passive_count": agentless, "tokens": toks, "signal_source": "local_logits" if real_signals else "deterministic_fallback"}
 
 def run_analysis(text, options):
     text = normalize_text(text)
@@ -174,6 +219,18 @@ def run_analysis(text, options):
     offset = 0
     for s in sentences:
         offset = text.find(s["text"], offset); s["start_char"] = offset; s["end_char"] = offset + len(s["text"]); offset = s["end_char"]
+    # Style-boundary Δ (REQ-FR-5.2): flag hybrid insertion when the feature-vector L2
+    # distance between consecutive sentences exceeds 0.55.
+    hybrid_boundaries = 0
+    for i, sent in enumerate(sentences):
+        if i == 0:
+            sent["style_boundary"] = 0.0
+            continue
+        prev, cur = _feature_vector(sentences[i - 1]), _feature_vector(sent)
+        delta = math.sqrt(sum((a - b) ** 2 for a, b in zip(prev, cur)))
+        sent["style_boundary"] = round(delta, 3)
+        if delta >= 0.55:
+            hybrid_boundaries += 1
     scores = [s["score"] for s in sentences]
     lengths = [len(token_parts(s["text"])) for s in sentences]
     mean = sum(scores) / max(1, len(scores)); top = sorted(scores, reverse=True)[:3]
@@ -183,7 +240,7 @@ def run_analysis(text, options):
     else: verdict = "Authentic Human Narrative"
     esl = round(sum(s["esl_score"] for s in sentences) / max(1, len(sentences)), 3)
     ppl = [s["perplexity"] for s in sentences]; cv = (max(ppl)-min(ppl))/max(1, sum(ppl)/len(ppl)); cl = (max(lengths)-min(lengths))/max(1, sum(lengths)/len(lengths))
-    summary = {"overall_score": overall, "raw_overall_score": round(.6*sum(s["raw_score"] for s in sentences)/len(sentences)+.4*sum(sorted([s["raw_score"] for s in sentences], reverse=True)[:3])/min(3,len(sentences)),3), "verdict": verdict, "burstiness_index": round(cv + .5*cl, 3), "mean_sentence_perplexity": round(sum(ppl)/len(ppl),2), "total_sentences": len(sentences), "flagged_sentence_count": sum(1 for s in sentences if s["score"] >= .42), "composition": {"human_percentage": round(sum(s["classification"]=="authentic_human" for s in sentences)/len(sentences)*100,1), "polished_percentage": round(sum(s["classification"]=="machine_polished" for s in sentences)/len(sentences)*100,1), "machine_percentage": round(sum(s["classification"]=="machine_generated" for s in sentences)/len(sentences)*100,1)}, "esl_safeguard_applied": options.esl_sensitivity_dampener and esl > .05, "esl_confidence_score": esl, "execution_time_ms": 0, "engine": {"model_checkpoint": local_model.checkpoint, "precision": local_model.dtype if local_model.available else "n/a", "device": local_model.device, "rule_version": "EAIA-1.0", "signal_source": "local_logits" if local_model.available else "deterministic_fallback"}, "warning": "LOW_SAMPLE_CONFIDENCE" if count <= 150 else None}
+    summary = {"overall_score": overall, "raw_overall_score": round(.6*sum(s["raw_score"] for s in sentences)/len(sentences)+.4*sum(sorted([s["raw_score"] for s in sentences], reverse=True)[:3])/min(3,len(sentences)),3), "verdict": verdict, "burstiness_index": round(cv + .5*cl, 3), "mean_sentence_perplexity": round(sum(ppl)/len(ppl),2), "total_sentences": len(sentences), "flagged_sentence_count": sum(1 for s in sentences if s["score"] >= .42), "hybrid_boundary_count": hybrid_boundaries, "composition": {"human_percentage": round(sum(s["classification"]=="authentic_human" for s in sentences)/len(sentences)*100,1), "polished_percentage": round(sum(s["classification"]=="machine_polished" for s in sentences)/len(sentences)*100,1), "machine_percentage": round(sum(s["classification"]=="machine_generated" for s in sentences)/len(sentences)*100,1)}, "esl_safeguard_applied": options.esl_sensitivity_dampener and esl > .05, "esl_confidence_score": esl, "execution_time_ms": 0, "engine": {"model_checkpoint": local_model.checkpoint, "precision": local_model.dtype if local_model.available else "n/a", "device": local_model.device, "rule_version": "Araxyss-1.0", "signal_source": "local_logits" if local_model.available else "deterministic_fallback"}, "warning": "LOW_SAMPLE_CONFIDENCE" if count <= 150 else None}
     return {"document_summary": summary, "sentences": sentences, "normalized_text": text}
 
 @router.get("/v1/health")
@@ -234,17 +291,91 @@ async def ingest(file: UploadFile = File(...), user=Depends(auth_user)):
     except Exception: raise HTTPException(422, "The document could not be parsed. Please paste the essay text instead.")
     return {"filename":file.filename,"text":text,"word_count":validation["word_count"],"warning":validation.get("warning")}
 
+@router.post("/v1/ingest_preview")
+async def ingest_preview(file: UploadFile = File(...)):
+    """Anonymous preview: parse a file and return only word count + a short excerpt (first ~14
+    words). No essay text leaves the request cycle. Enables the landing dropzone without login."""
+    raw = await file.read()
+    try:
+        text, validation = extract_text(file.filename, raw)
+    except ValueError as exc: raise HTTPException(415, str(exc))
+    except Exception: raise HTTPException(422, "The document could not be parsed.")
+    words = text.split()
+    excerpt = " ".join(words[:14]) + ("…" if len(words) > 14 else "")
+    return {"filename": file.filename, "word_count": validation["word_count"], "warning": validation.get("warning"), "excerpt": excerpt}
+
 @router.post("/v1/export/pdf")
-async def export_pdf(data: AnalysisRequest, user=Depends(auth_user)):
+async def export_pdf(data: ExportRequest, user=Depends(auth_user)):
     result = run_analysis(data.text, data.options)
     try:
         from reportlab.pdfgen import canvas
-        buf=io.BytesIO(); c=canvas.Canvas(buf); c.setFont("Helvetica-Bold",16); c.drawString(50,800,"EAIA Evidence Dossier"); c.setFont("Helvetica",10); c.drawString(50,780,f"Verdict: {result['document_summary']['verdict']} | Score: {result['document_summary']['overall_score']}"); y=750
+        from reportlab.lib.colors import HexColor
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf)
+        summary = result["document_summary"]
+        # Header
+        c.setFont("Helvetica-Bold", 18)
+        c.drawString(50, 800, "Araxyss · Evidence Dossier")
+        c.setFont("Helvetica", 10)
+        c.drawString(50, 782, f"Verdict: {summary['verdict']}   Score: {summary['overall_score']:.2f}   Burstiness: {summary['burstiness_index']:.2f}   ESL score: {summary['esl_confidence_score']:.2f}")
+        c.drawString(50, 768, f"Engine: {summary['engine']['model_checkpoint']} · {summary['engine']['device']} · rule {summary['engine']['rule_version']}")
+        overrides = data.reviewer_overrides or {}
+        notes = data.reviewer_notes or {}
+        confirmed = sum(1 for v in overrides.values() if v == "confirmed")
+        dismissed = sum(1 for v in overrides.values() if v == "dismissed")
+        c.drawString(50, 754, f"Reviewer decisions: {confirmed} confirmed · {dismissed} dismissed · {len(notes)} notes")
+        y = 730
+        color_map = {"machine_generated": HexColor("#EF4444"), "machine_polished": HexColor("#EAB308"), "authentic_human": HexColor("#22C55E")}
         for s in result["sentences"]:
-            if y<60: c.showPage(); y=800
-            c.drawString(50,y,f"{s['sentence_id']+1}. {s['classification']} ({s['score']})"); y-=16; c.drawString(65,y,redact(s['text']) if len(s['text'].split())>3 else s['text']); y-=28
-        c.drawString(50,y,"SHA-256: "+hashlib.sha256((data.text+json.dumps(result,sort_keys=True)).encode()).hexdigest()); c.save(); return Response(buf.getvalue(),media_type="application/pdf",headers={"Content-Disposition":"attachment; filename=eaia-dossier.pdf"})
-    except ImportError: raise HTTPException(503,"PDF export dependency is unavailable; use JSON export or print this dossier")
+            if y < 90:
+                c.showPage()
+                y = 800
+            tag = overrides.get(str(s["sentence_id"])) or overrides.get(s["sentence_id"])
+            c.setFillColor(color_map.get(s["classification"], HexColor("#111827")))
+            c.setFont("Helvetica-Bold", 10)
+            marker = " ✓ CONFIRMED" if tag == "confirmed" else "  DISMISSED" if tag == "dismissed" else ""
+            c.drawString(50, y, f"{s['sentence_id']+1:02d}. {s['classification'].replace('_',' ').upper()} · score {s['score']:.2f} · ppl {s['perplexity']:.1f}{marker}")
+            y -= 14
+            c.setFillColor(HexColor("#111827"))
+            c.setFont("Helvetica", 9)
+            # Wrap the sentence text so long lines don't overrun the page.
+            words = s["text"].split()
+            line = ""
+            for w in words:
+                if len(line) + len(w) + 1 > 105:
+                    c.drawString(65, y, line)
+                    y -= 12
+                    if y < 80:
+                        c.showPage(); y = 800
+                    line = w
+                else:
+                    line = f"{line} {w}".strip()
+            if line:
+                c.drawString(65, y, line)
+                y -= 12
+            reason_line = "; ".join(s.get("reasons", [])[:2])
+            if reason_line:
+                c.setFont("Helvetica-Oblique", 8)
+                c.setFillColor(HexColor("#6B7280"))
+                c.drawString(65, y, f"reasons: {reason_line[:110]}")
+                y -= 12
+            note = notes.get(str(s["sentence_id"])) or notes.get(s["sentence_id"])
+            if note:
+                c.setFont("Helvetica-Oblique", 8)
+                c.setFillColor(HexColor("#4F46E5"))
+                c.drawString(65, y, f"reviewer note: {note[:110]}")
+                y -= 12
+            y -= 6
+        if y < 60:
+            c.showPage(); y = 800
+        c.setFont("Helvetica", 8)
+        c.setFillColor(HexColor("#6B7280"))
+        digest = hashlib.sha256((data.text + json.dumps(result, sort_keys=True)).encode()).hexdigest()
+        c.drawString(50, y, f"SHA-256: {digest}")
+        c.save()
+        return Response(buf.getvalue(), media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=araxyss-dossier.pdf"})
+    except ImportError:
+        raise HTTPException(503, "PDF export dependency is unavailable; use JSON export or print this dossier")
 
 app.include_router(router)
 app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=os.environ.get("CORS_ORIGINS","*").split(","), allow_methods=["*"], allow_headers=["*"])

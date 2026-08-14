@@ -1,36 +1,117 @@
 {
-  "app_type": "hybrid_fullstack dashboard + public product site",
-  "theme": "Editorial Academic Dark/Light Mode with Serif Artifacts",
+  "project_overview": {
+    "name": "Araxyss",
+    "description": "An explainable AI essay auditor for admissions readers, evaluating sentence-level AI likelihood, perplexity, and ESL fairness.",
+    "app_type": "hybrid_fullstack",
+    "core_vibe": "Immersive, cinematic marketing combined with a calm, high-trust, document-like analytical workspace.",
+    "themes": {
+      "marketing": "Dark Mode (Midnight Obsidian with deep textures and cinematic 3D lighting)",
+      "workspace": "Light Mode (Bone White, high-contrast typography, reading-focused)"
+    }
+  },
+  "logo_design": {
+    "name": "Araxyss",
+    "concept": "A stylized monospace 'A' flanked by mathematical brackets '[' and ']', incorporating a signal wave/rank-bin motif. It feels like an academic data glyph.",
+    "svg_code": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\" className=\"w-8 h-8\"><path d=\"M50 20 L25 80 H40 L50 55 L60 80 H75 Z\" fill=\"currentColor\" /><rect x=\"40\" y=\"65\" width=\"20\" height=\"8\" fill=\"currentColor\" /><path d=\"M15 15 v70 h10\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"6\" stroke-linecap=\"square\"/><path d=\"M85 15 v70 h-10\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"6\" stroke-linecap=\"square\"/></svg>"
+  },
   "typography": {
-    "headings": "Playfair Display, serif",
-    "body": "Plus Jakarta Sans, sans-serif",
-    "mono": "JetBrains Mono, monospace"
+    "strategy": "The 'Old Money Tech' archetype mixed with 'Editorial Future'.",
+    "fonts": {
+      "heading": {
+        "family": "Cormorant Garamond, serif",
+        "usage": "Marketing hero text, report titles, serious academic document headers.",
+        "weight": "font-light to font-semibold"
+      },
+      "body_and_ui": {
+        "family": "JetBrains Mono, monospace",
+        "usage": "UI elements, navigation, data tables, metrics, buttons, GLTR token annotations.",
+        "weight": "font-normal to font-bold"
+      },
+      "essay_text": {
+        "family": "Playfair Display, serif",
+        "usage": "The actual essay text inside the workspace for maximum reading comfort."
+      }
+    },
+    "hierarchy": {
+      "h1": "text-5xl sm:text-6xl tracking-tight leading-none",
+      "h2": "text-3xl sm:text-4xl tracking-tight leading-none",
+      "h3": "text-2xl",
+      "body": "text-base leading-relaxed tracking-normal",
+      "overline": "text-xs uppercase tracking-[0.2em] font-bold"
+    }
   },
   "colors": {
-    "primary": "#1e293b",
-    "accent": "#6366f1",
-    "risk_high": "#ef4444",
-    "risk_medium": "#f59e0b",
-    "risk_low": "#10b981",
-    "surface": "#0f172a",
-    "card": "#1e293b",
-    "paper": "#f8fafc"
+    "strategy": "Archetype 4: Swiss & High-Contrast for Workspace. Archetype 5: Luxury/Cinematic for Marketing.",
+    "palette": {
+      "marketing_background": "#0A0A0A",
+      "workspace_background": "#FAFAFA",
+      "workspace_surface": "#FFFFFF",
+      "text_primary_dark": "#FFFFFF",
+      "text_primary_light": "#111827",
+      "text_secondary_dark": "#9CA3AF",
+      "text_secondary_light": "#4B5563",
+      "border_dark": "#27272A",
+      "border_light": "#E5E7EB",
+      "accent": "#4F46E5"
+    },
+    "srs_mandated_risk_colors": {
+      "description": "GLTR rank bins. MUST NOT be used decoratively. Only use for sentence/token highlighting and data charts.",
+      "green": "#22C55E",
+      "yellow": "#EAB308",
+      "red": "#EF4444",
+      "purple": "#A855F7"
+    }
   },
-  "visual_enhancers": {
-    "glassmorphism": "backdrop-blur-xl bg-slate-900/80 border border-slate-800",
-    "shadows": "shadow-2xl shadow-slate-950/50",
-    "borders": "border border-slate-800/80"
+  "layouts_and_spacing": {
+    "general": "Generous spacing. p-8, p-12, p-16 for structural sections.",
+    "marketing_layout": "Asymmetrical bento grids, overlapping glassmorphic cards.",
+    "workspace_layout": "Split-pane layout. Left pane: 60% width, scrolling essay view with generous padding. Right pane: 40% width, sticky evidence drawer with dense, high-trust analytical widgets.",
+    "pdf_upload_zone": "A translucent, glowing glassmorphic dropzone centered in the 3D marketing hero. Needs backdrop-blur-2xl, a delicate 1px border (border-white/20), and a subtle inner shadow. When hovered/dragged over, border shifts to the primary accent color.",
+    "surfaces": {
+      "marketing_cards": "Glassmorphism: bg-white/5 backdrop-blur-xl border border-white/10 shadow-2xl",
+      "workspace_cards": "Flat Solid: bg-white border border-gray-200 shadow-sm"
+    }
   },
-  "component_path": "/app/frontend/src/components",
-  "image_urls": {
-    "parchment_texture": "https://images.unsplash.com/photo-1705837863332-7162639852d8",
-    "study_desk": "https://images.unsplash.com/photo-1654356709115-3f68998bead4"
+  "motion_and_interactions": {
+    "custom_cursor": "A dot that follows the mouse using framer-motion. Over text, it blends using mix-blend-mode: difference. Over the essay text, it subtly highlights the current sentence. Over buttons, it expands and snaps magnetically.",
+    "hover_effects": "Cards tilt slightly towards the mouse (3D tilt effect). Links reveal an underline originating from the center.",
+    "parallax": "Marketing background elements and 3D scenes move slightly in opposition to scroll.",
+    "transitions": "Use transition: transform 0.3s ease, opacity 0.3s ease. Avoid 'transition: all'."
   },
-  "instructions_to_main_agent": "Ensure full implementation of EAIA Explainable AI Essay Auditor with FastAPI backend, deterministic scoring over Llama/GPT-2 token logprobs, GLTR evidence, spaCy syntax, cliché matcher, ESL safeguard toggle, PDF/JSON export, SSE streaming, methodology page, and secure report saving without raw essay retention.",
-  "UNIVERSAL GUIDELINES FOR MAIN AGENT": [
-    "Every interactive element must include data-testid",
-    "No universal transition:all",
-    "Clean serif typography for essay artifact, sans for UI",
-    "Dedicated risk color indicators with accessible non-color labels"
+  "3d_strategy": {
+    "library": "React Three Fiber (@react-three/fiber, @react-three/drei, three)",
+    "concept": "A 'constellation' of 3D text tokens or floating sentence blocks connected by glowing spline evidence lines. The splines map to the GLTR risk colors (Green, Yellow, Red, Purple) to visually represent the neural network's analysis process.",
+    "implementation": "Use <Text> from drei for tokens, <Line> or <TubeGeometry> for the splines. Wrap in <Float> for organic hovering motion. Set background to transparent so it overlays the dark cinematic DOM background."
+  },
+  "media_and_images": {
+    "strategy": "Use dark cinematic abstract textures for the marketing background to provide a gritty, non-flat feel.",
+    "images": [
+      {
+        "url": "https://images.unsplash.com/photo-1578662996442-48f60103fc96?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2OTV8MHwxfHNlYXJjaHwxfHxkYXJrJTIwY2luZW1hdGljJTIwYWJzdHJhY3QlMjB0ZXh0dXJlfGVufDB8fHx8MTc4NjczMTk1OHww&ixlib=rb-4.1.0&q=85",
+        "category": "Marketing Background Texture",
+        "description": "Use as an absolute background with low opacity (e.g., opacity-20) and mix-blend-overlay behind the 3D scene."
+      }
+    ]
+  },
+  "components_guidance": {
+    "landing_page": "Immersive 3D hero with the interactive PDF drag-and-drop zone. Features the Araxyss logo animated on load. Uses Lenis for smooth scrolling.",
+    "reviewer_workspace": "Minimalist split-pane. Left side: The essay text with inline GLTR heatmap highlights. Right side: The 'Evidence Drawer' showing Perplexity graph, ESL fairness score, and Confirm/Dismiss buttons. Use Shadcn components for UI logic, but stripped of generic Vercel looks.",
+    "methodology_page": "High-contrast editorial layout. Public methodology with dataset cards, benchmark numbers, and error case studies.",
+    "auth": "Side-by-side layout. Left: the cinematic abstract background with a 3D token rotating. Right: calm, clean form."
+  },
+  "instructions_to_main_agent": {
+    "setup": "Install necessary libraries: three, @react-three/fiber, @react-three/drei, framer-motion, lucide-react, lenis.",
+    "theming": "Implement a clear dark mode for marketing routes (Landing, Auth, Methodology) and light mode for the app route (Workspace).",
+    "custom_cursor": "Create a global <CustomCursor /> component tracking mouse coordinates, rendering a div with fixed positioning and pointer-events-none.",
+    "data_testid": "Ensure every button, link, and major interactive element includes a descriptive data-testid."
+  },
+  "universal_guidelines_for_main_agent": [
+    "Do not use generic 'Inter' font. Stick to the chosen Serif/Monospace combination to maintain the serious document feel.",
+    "Use framer-motion for magnetic buttons and page transitions.",
+    "Never use purely transparent backgrounds for headers or overlays where text visibility could be compromised.",
+    "Ensure contrast ratios meet APCA standards. Use text shadows when text is overlaid on 3D or textured backgrounds.",
+    "Avoid typical Bootstrap columns; use dynamic bento-style grids for marketing and strict panel layouts for the workspace.",
+    "No AI emoji characters in UI. Use lucide-react icons.",
+    "Do not center-align the main App container."
   ]
 }
