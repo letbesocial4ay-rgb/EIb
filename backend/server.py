@@ -8,7 +8,15 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 import os, re, math, json, uuid, hashlib, secrets, logging, io, asyncio
+# Load .env early so HF_HOME etc. are set before transformers/torch import their config.
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / ".env")
+for _k in ("HF_HOME", "TRANSFORMERS_CACHE"):
+    if os.environ.get("HF_HOME") and not os.environ.get(_k):
+        os.environ[_k] = os.environ["HF_HOME"]
 import bcrypt, jwt
+from engine.ingestion.file_parsers import extract_text
+from engine.inference.model_loader import load_local_model
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -20,6 +28,7 @@ db = client[DB_NAME]
 app = FastAPI(title="EAIA Explainable Essay Auditor")
 router = APIRouter(prefix="/api")
 logger = logging.getLogger("eaia")
+local_model = load_local_model()
 
 def redact(value: str) -> str:
     return value if len(value.split()) <= 3 else "[essay text redacted]"
@@ -45,6 +54,7 @@ class SaveReport(BaseModel):
     document_summary: dict
     sentences: list[dict]
     reviewer_notes: dict = {}
+    reviewer_overrides: dict = {}
 
 def token_parts(text: str):
     return re.findall(r"\b[\w’'-]+\b|[^\w\s]", text)
@@ -88,6 +98,28 @@ async def me(user=Depends(auth_user)): return {"user": user}
 CLICHES = ["navigate the intricate complexities of", "profound testament to", "in today's fast-paced world", "has taught me that", "journey of self-discovery", "made me who I am today", "at the end of the day", "ever-changing landscape"]
 TRANSITIONS = {"furthermore", "moreover", "in conclusion", "on the other hand", "firstly", "secondly", "therefore", "consequently", "in addition"}
 
+def _real_token_evidence(text):
+    """Wrap the local model call so any inference error falls back to deterministic evidence."""
+    if not local_model.available:
+        return None
+    try:
+        return local_model.token_evidence(text)
+    except Exception as exc:
+        logger.warning("token_evidence failed on sentence: %s", type(exc).__name__)
+        return None
+
+def _sentence_signals_from_model(rows):
+    """Deterministic scoring on top of raw logits — the ONLY use of the model's output."""
+    if not rows:
+        return None
+    n = len(rows)
+    nlls = [-r["log_prob"] for r in rows]
+    mean_nll = sum(nlls) / n
+    ppl = round(min(400, math.exp(min(6.5, mean_nll))), 2)
+    top10 = round(sum(1 for r in rows if r["rank"] <= 10) / n, 3)
+    top100 = round(sum(1 for r in rows if r["rank"] <= 100) / n, 3)
+    return {"perplexity": ppl, "top10_ratio": top10, "top100_ratio": top100}
+
 def analyze_sentence(text, idx, damp=True):
     words = re.findall(r"[A-Za-z][A-Za-z'-]*", text)
     lower = text.lower()
@@ -99,8 +131,16 @@ def analyze_sentence(text, idx, damp=True):
     depth = round(min(12, 2.3 + punct * .55 + max(0, length - 14) * .06), 2)
     formulaic = min(1, transition_count / 2 + (0.25 if " in conclusion" in lower else 0))
     esl = min(1, formulaic * .65 + (0.25 if unique < .58 and length > 12 else 0) + (0.1 if " the " in lower and " of " in lower else 0))
-    ppl = round(max(9, 52 - unique * 28 - min(10, punct * 1.5) + (length % 7)), 2)
-    top10 = round(max(.04, min(.82, .82 - ppl / 90 + unique * .12)), 3)
+    real_rows = _real_token_evidence(text)
+    real_signals = _sentence_signals_from_model(real_rows)
+    if real_signals:
+        ppl = real_signals["perplexity"]
+        top10 = real_signals["top10_ratio"]
+        top100 = real_signals["top100_ratio"]
+    else:
+        ppl = round(max(9, 52 - unique * 28 - min(10, punct * 1.5) + (length % 7)), 2)
+        top10 = round(max(.04, min(.82, .82 - ppl / 90 + unique * .12)), 3)
+        top100 = round(min(1, top10 + .24), 3)
     c_syn = min(1, len(matches) * .35 + (0.2 if formulaic > .4 else 0))
     raw = sigmoid(2.5 * (1 - min(ppl, 45) / 45) + 2.2 * top10 + 1.4 * c_syn - 1.85)
     adjusted = max(0, raw - (.28 if esl >= .6 else .28 * esl / .6) * esl) if damp else raw
@@ -113,12 +153,15 @@ def analyze_sentence(text, idx, damp=True):
     if depth > 5.5: reasons.append(f"Syntactic depth is {depth}, with layered clause structure")
     if esl >= .45: reasons.append(f"ESL safeguard detected formulaic connector/compression patterns (E={esl:.2f})")
     if not reasons: reasons.append("Signals remain within the human-writing baseline; inspect the raw token evidence")
-    toks = []
-    for n, tok in enumerate(token_parts(text)):
-        rank = 1 + ((len(tok) * 17 + n * 29 + length * 7) % 1600)
-        bin_name = "green" if rank <= 10 else "yellow" if rank <= 100 else "red" if rank <= 1000 else "purple"
-        toks.append({"token": tok, "token_id": 100 + (ord(tok[0]) if tok else 0), "log_prob": round(-math.log(max(.001, 1 / rank)), 3), "rank": rank, "bin": bin_name, "alternatives": [{"token": "the", "prob": .18}, {"token": "a", "prob": .11}, {"token": "this", "prob": .07}]})
-    return {"sentence_id": idx, "text": text, "score": score, "raw_score": round(raw, 3), "classification": classification, "perplexity": ppl, "top10_ratio": top10, "top100_ratio": round(min(1, top10 + .24), 3), "syntactic_depth": depth, "flagged_markers": matches, "reasons": reasons, "esl_score": round(esl, 3), "tokens": toks}
+    if real_rows:
+        toks = real_rows
+    else:
+        toks = []
+        for n, tok in enumerate(token_parts(text)):
+            rank = 1 + ((len(tok) * 17 + n * 29 + length * 7) % 1600)
+            bin_name = "green" if rank <= 10 else "yellow" if rank <= 100 else "red" if rank <= 1000 else "purple"
+            toks.append({"token": tok, "token_id": 100 + (ord(tok[0]) if tok else 0), "log_prob": round(-math.log(max(.001, 1 / rank)), 3), "rank": rank, "bin": bin_name, "alternatives": [{"token": "the", "prob": .18}, {"token": "a", "prob": .11}, {"token": "this", "prob": .07}]})
+    return {"sentence_id": idx, "text": text, "score": score, "raw_score": round(raw, 3), "classification": classification, "perplexity": ppl, "top10_ratio": top10, "top100_ratio": top100, "syntactic_depth": depth, "flagged_markers": matches, "reasons": reasons, "esl_score": round(esl, 3), "tokens": toks, "signal_source": "local_logits" if real_signals else "deterministic_fallback"}
 
 def run_analysis(text, options):
     text = normalize_text(text)
@@ -140,11 +183,21 @@ def run_analysis(text, options):
     else: verdict = "Authentic Human Narrative"
     esl = round(sum(s["esl_score"] for s in sentences) / max(1, len(sentences)), 3)
     ppl = [s["perplexity"] for s in sentences]; cv = (max(ppl)-min(ppl))/max(1, sum(ppl)/len(ppl)); cl = (max(lengths)-min(lengths))/max(1, sum(lengths)/len(lengths))
-    summary = {"overall_score": overall, "raw_overall_score": round(.6*sum(s["raw_score"] for s in sentences)/len(sentences)+.4*sum(sorted([s["raw_score"] for s in sentences], reverse=True)[:3])/min(3,len(sentences)),3), "verdict": verdict, "burstiness_index": round(cv + .5*cl, 3), "mean_sentence_perplexity": round(sum(ppl)/len(ppl),2), "total_sentences": len(sentences), "flagged_sentence_count": sum(1 for s in sentences if s["score"] >= .42), "composition": {"human_percentage": round(sum(s["classification"]=="authentic_human" for s in sentences)/len(sentences)*100,1), "polished_percentage": round(sum(s["classification"]=="machine_polished" for s in sentences)/len(sentences)*100,1), "machine_percentage": round(sum(s["classification"]=="machine_generated" for s in sentences)/len(sentences)*100,1)}, "esl_safeguard_applied": options.esl_sensitivity_dampener and esl > .05, "esl_confidence_score": esl, "execution_time_ms": 0, "engine": {"model_checkpoint": "meta-llama/Llama-3.2-1B → GPT-2 fallback / deterministic evidence adapter", "precision": "FP16 when available", "device": "CPU fallback", "rule_version": "EAIA-1.0"}, "warning": "LOW_SAMPLE_CONFIDENCE" if count <= 150 else None}
+    summary = {"overall_score": overall, "raw_overall_score": round(.6*sum(s["raw_score"] for s in sentences)/len(sentences)+.4*sum(sorted([s["raw_score"] for s in sentences], reverse=True)[:3])/min(3,len(sentences)),3), "verdict": verdict, "burstiness_index": round(cv + .5*cl, 3), "mean_sentence_perplexity": round(sum(ppl)/len(ppl),2), "total_sentences": len(sentences), "flagged_sentence_count": sum(1 for s in sentences if s["score"] >= .42), "composition": {"human_percentage": round(sum(s["classification"]=="authentic_human" for s in sentences)/len(sentences)*100,1), "polished_percentage": round(sum(s["classification"]=="machine_polished" for s in sentences)/len(sentences)*100,1), "machine_percentage": round(sum(s["classification"]=="machine_generated" for s in sentences)/len(sentences)*100,1)}, "esl_safeguard_applied": options.esl_sensitivity_dampener and esl > .05, "esl_confidence_score": esl, "execution_time_ms": 0, "engine": {"model_checkpoint": local_model.checkpoint, "precision": local_model.dtype if local_model.available else "n/a", "device": local_model.device, "rule_version": "EAIA-1.0", "signal_source": "local_logits" if local_model.available else "deterministic_fallback"}, "warning": "LOW_SAMPLE_CONFIDENCE" if count <= 150 else None}
     return {"document_summary": summary, "sentences": sentences, "normalized_text": text}
 
 @router.get("/v1/health")
-async def health(): return {"status":"healthy", "model_checkpoint":"meta-llama/Llama-3.2-1B (fallback adapter)", "precision":"FP16 when available", "device":"CPU fallback", "gpu_memory_allocated_mb":0, "system_memory_allocated_mb":0, "inference_engine":"deterministic local evidence engine"}
+async def health():
+    mem_mb = 0
+    try:
+        import torch, psutil
+        if local_model.device == "cuda" and torch.cuda.is_available():
+            mem_mb = round(torch.cuda.memory_allocated() / (1024 * 1024), 1)
+        else:
+            mem_mb = round(psutil.Process().memory_info().rss / (1024 * 1024), 1)
+    except Exception:
+        pass
+    return {"status":"healthy", "model_checkpoint":local_model.checkpoint, "precision":local_model.dtype if local_model.available else "n/a", "device":local_model.device, "system_memory_allocated_mb":mem_mb, "inference_engine":"local logits" if local_model.available else "deterministic evidence fallback", "model_load_ms":local_model.load_ms}
 
 @router.post("/v1/analyze")
 async def analyze(data: AnalysisRequest, user=Depends(auth_user)):
@@ -166,7 +219,7 @@ async def save_report(data: SaveReport, user=Depends(auth_user)):
     allowed = {"sentence_id", "score", "raw_score", "classification", "perplexity", "top10_ratio", "top100_ratio", "syntactic_depth", "flagged_markers", "reasons", "esl_score", "start_char", "end_char"}
     for sentence in data.sentences:
         safe_sentences.append({k: v for k, v in sentence.items() if k in allowed})
-    rid = str(uuid.uuid4()); await db.reports.insert_one({"id":rid,"user_id":user["sub"],"document_summary":data.document_summary,"sentences":safe_sentences,"reviewer_notes":data.reviewer_notes,"created_at":datetime.now(timezone.utc).isoformat()}); return {"id":rid,"message":"Evidence summary saved without essay text"}
+    rid = str(uuid.uuid4()); await db.reports.insert_one({"id":rid,"user_id":user["sub"],"document_summary":data.document_summary,"sentences":safe_sentences,"reviewer_notes":data.reviewer_notes,"reviewer_overrides":data.reviewer_overrides,"created_at":datetime.now(timezone.utc).isoformat()}); return {"id":rid,"message":"Evidence summary saved without essay text"}
 
 @router.get("/v1/reports")
 async def reports(user=Depends(auth_user)):
@@ -174,8 +227,12 @@ async def reports(user=Depends(auth_user)):
 
 @router.post("/v1/ingest")
 async def ingest(file: UploadFile = File(...), user=Depends(auth_user)):
-    raw = await file.read(); name = file.filename.lower(); text = raw.decode("utf-8", errors="replace") if name.endswith(".txt") else "Document text extraction is available for PDF and DOCX in the local engine. Please paste the extracted essay text to analyze."
-    return {"filename":file.filename,"text":normalize_text(text),"word_count":len(text.split())}
+    raw = await file.read()
+    try:
+        text, validation = extract_text(file.filename, raw)
+    except ValueError as exc: raise HTTPException(415, str(exc))
+    except Exception: raise HTTPException(422, "The document could not be parsed. Please paste the essay text instead.")
+    return {"filename":file.filename,"text":text,"word_count":validation["word_count"],"warning":validation.get("warning")}
 
 @router.post("/v1/export/pdf")
 async def export_pdf(data: AnalysisRequest, user=Depends(auth_user)):

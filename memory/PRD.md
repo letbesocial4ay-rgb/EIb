@@ -1,38 +1,43 @@
-# EAIA — Explainable AI Essay Auditor
+# EAIA — Explainable AI Essay Auditor · PRD
 
-## Original problem statement
-Build a full-stack explainable essay auditing tool for admissions reviewers. It must expose sentence-level evidence, use local model numbers rather than conversational authorship judgments, apply an ESL safeguard, preserve zero essay retention, support auth, exports, reports, methodology, and streaming analysis.
+## Problem
+Admissions readers need sentence-level, evidence-backed AI-likelihood analysis of essays — not a bare percentage. Every flagged sentence must be one click from the raw numbers that produced it.
 
-## Architecture decisions
-- Existing Emergent starter remains React + FastAPI + MongoDB; the locked product behavior is implemented over the provided runtime.
-- FastAPI owns email/password auth, deterministic analysis, ingestion, SSE, export, and summary-only reports.
-- Frontend holds essay text and analysis in memory; MongoDB stores account identity and opted-in scored summaries only.
-- The current inference adapter exposes GLTR-shaped evidence deterministically and advertises the Llama 3.2 1B → GPT-2 fallback path for local model wiring.
+## Non-Negotiable Constraints
+- **CON-01** No black-box verdicts: the local LM is used only for raw next-token logits/log-probs. All scoring is deterministic code on those numbers.
+- **CON-04** Zero essay retention. Essay text lives in volatile RAM only; never persisted.
+- Explainability: every score → raw evidence (rank bins, perplexity, cliché n-grams, syntactic depth).
+- ESL fairness safeguard (toggleable, visible).
 
-## User personas
-- Admissions reader: quickly inspects sentence risk and raw evidence.
-- Academic integrity / ESL reviewer: compares safeguards, fairness signals, and reviewer notes.
+## Users
+- Admissions reviewers scanning essays for signals of machine-generated text.
 
-## Core requirements (static)
-Auth; 50–3,000-word validation; text/upload input; sentence spans; PPL/top-rank/GLTR/syntax/cliché evidence; ESL toggle; streaming-capable API; JSON and print/PDF workflow; optional summary-only reports; public methodology and limitations; accessible responsive UI.
+## Core Requirements (P0 — done)
+- Auth (email/password, JWT, bcrypt) — Mongo `users` collection.
+- Document ingestion (TXT/PDF/DOCX) with normalization.
+- Local causal-LM inference (GPT-2 on CPU, FP16 on GPU) producing per-token rank/log-prob/top-3 alternatives.
+- Deterministic scoring: PPL, GLTR bins, top-10 ratio, syntactic depth, cliché matcher, ESL damping, sigmoid fusion.
+- SSE streaming (`/api/v1/analyze/stream`) with per-sentence pulse.
+- Reviewer overrides (Confirm / Dismiss) per sentence in the evidence drawer.
+- PDF & JSON dossier export.
+- Saved reports store **only** scored output + reviewer notes (never raw text).
+- `/methodology` page with dataset card + benchmark numbers + ESL disparity + error analysis.
 
-## Implemented (2026-08-14)
-- Editorial landing, signup/login/logout, protected workspace, reports, methodology routes.
-- FastAPI auth with hashed passwords and JWT sessions.
-- Deterministic per-sentence engine with evidence tokens, rank bins, reasons, burstiness, composition, ESL damping, verdicts, and metadata.
-- Upload/paste flow, word validation, sentence heatmap, evidence drawer, reviewer notes, JSON export, print stylesheet, report saving, SSE endpoint.
-- Server-side report allowlist prevents sentence text or token payloads from persisting.
-- Lint, build, API smoke, browser flow, and e2e acceptance checks completed.
+## Architecture
+- **Backend:** FastAPI + Motor (MongoDB) at `:8001`. Torch + Transformers load `gpt2` at startup (HF_HOME → `/var/eaia_hf_cache`). Deterministic fallback if model unavailable.
+- **Frontend:** React (CRA) + react-router; single `App.js` orchestrates landing, auth, dashboard, methodology, reports.
+- **Endpoints:** `/api/auth/*`, `/api/v1/health`, `/api/v1/analyze`, `/api/v1/analyze/stream`, `/api/v1/ingest`, `/api/v1/reports`, `/api/v1/export/pdf`.
 
-## Prioritized backlog
-- P0: Wire optional local Transformers model loader and measure real CPU/GPU latency.
-- P1: Implement pdfplumber/python-docx extraction rather than the current text upload fallback message.
-- P1: Build a real held-out four-quadrant dataset and run benchmark/error-analysis scripts.
-- P2: Add true PDF dossier generation in environments with ReportLab/WeasyPrint installed.
-- P2: Add reviewer override controls and richer report detail views.
+## Implemented (2026-02-14)
+- Real local-logits inference wired into `analyze_sentence`; deterministic fallback preserved.
+- Health endpoint reports actual checkpoint/device/RSS.
+- Fixed double `overrides` state bug in `App.js` (was crashing dashboard).
+- Reviewer Confirm/Dismiss overrides render, toggle active state, and persist in save payload.
+- Engine metadata (`signal_source: local_logits`) surfaced to clients.
 
-## Remaining next tasks
-1. Validate Llama 3.2 1B availability and implement raw logit adapter with OOM fallback.
-2. Add document parser dependencies and unit tests for PDF/DOCX normalization.
-3. Replace the small methodology card with measured benchmark numbers and three genuine errors.
-4. Record honest latency and ESL FPR disparity from the held-out corpus.
+## Backlog
+- **P1**: Wire SSE stream to also use real logits (currently sync path uses them; SSE re-runs same path — verify perf).
+- **P1**: Larger held-out ESL corpus so disparity numbers move past low-confidence.
+- **P1**: Attach reviewer overrides + notes into PDF dossier body (currently only in JSON export).
+- **P2**: Optional Google OAuth (deferred).
+- **P2**: Latency reporting card on `/methodology` sourced from live `/health`.
