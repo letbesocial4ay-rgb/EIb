@@ -1,5 +1,5 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Depends, Header
-from fastapi.responses import StreamingResponse, Response
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Depends, Header, Request, Response, Cookie
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, EmailStr
 from dotenv import load_dotenv
@@ -7,7 +7,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
-import os, re, math, json, uuid, hashlib, secrets, logging, io, asyncio
+import os, re, math, json, uuid, hashlib, secrets, logging, io, asyncio, httpx
 # Load .env early so HF_HOME etc. are set before transformers/torch import their config.
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -71,13 +71,48 @@ def normalize_text(text: str) -> str:
 
 def sigmoid(x): return 1 / (1 + math.exp(-max(-20, min(20, x))))
 
-def auth_user(authorization: Optional[str] = Header(None)):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Sign in required")
-    try:
-        return jwt.decode(authorization.split(" ", 1)[1], JWT_SECRET, algorithms=["HS256"])
-    except Exception:
-        raise HTTPException(401, "Session expired")
+EMERGENT_AUTH_SESSION_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+COOKIE_KWARGS = {"httponly": True, "secure": True, "samesite": "none", "path": "/"}
+
+async def _resolve_session_token(token: str):
+    """Look up an Emergent session token in Mongo. Returns the linked user dict or None."""
+    sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+    if not sess:
+        return None
+    expires = sess.get("expires_at")
+    if isinstance(expires, str):
+        try:
+            expires = datetime.fromisoformat(expires)
+        except ValueError:
+            return None
+    if expires and expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires and expires < datetime.now(timezone.utc):
+        return None
+    return await db.users.find_one({"id": sess["user_id"]}, {"_id": 0, "password_hash": 0})
+
+async def auth_user(request: Request, authorization: Optional[str] = Header(None)):
+    """Accept either:
+       1. session_token cookie (Emergent Google Auth), or
+       2. session_token via Authorization: Bearer header (mobile / SPA fallback), or
+       3. Legacy JWT via Authorization: Bearer header (email/password login).
+    """
+    cookie_token = request.cookies.get("session_token")
+    if cookie_token:
+        user = await _resolve_session_token(cookie_token)
+        if user:
+            return {"sub": user["id"], "email": user["email"], "name": user.get("name"), "picture": user.get("picture"), "auth_via": "google_cookie"}
+    if authorization and authorization.startswith("Bearer "):
+        raw = authorization.split(" ", 1)[1]
+        user = await _resolve_session_token(raw)
+        if user:
+            return {"sub": user["id"], "email": user["email"], "name": user.get("name"), "picture": user.get("picture"), "auth_via": "google_bearer"}
+        try:
+            claims = jwt.decode(raw, JWT_SECRET, algorithms=["HS256"])
+            return {**claims, "auth_via": "jwt"}
+        except Exception:
+            pass
+    raise HTTPException(401, "Sign in required")
 
 def make_token(user_id, email, name):
     return jwt.encode({"sub": user_id, "email": email, "name": name, "exp": datetime.now(timezone.utc) + timedelta(days=7)}, JWT_SECRET, algorithm="HS256")
@@ -97,7 +132,69 @@ async def login(data: Login):
     return {"token": make_token(user["id"], user["email"], user["name"]), "user": {"id": user["id"], "email": user["email"], "name": user["name"]}}
 
 @router.get("/auth/me")
-async def me(user=Depends(auth_user)): return {"user": user}
+async def me(user=Depends(auth_user)):
+    return {"user": {"id": user["sub"], "email": user.get("email"), "name": user.get("name"), "picture": user.get("picture")}, "auth_via": user.get("auth_via", "jwt")}
+
+@router.post("/auth/google/session")
+async def google_session(request: Request, response: Response):
+    """Exchange an Emergent OAuth session_id for a persistent app session.
+    REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH.
+    The frontend must derive the redirect_url from window.location.origin.
+    """
+    session_id = request.headers.get("X-Session-ID") or request.headers.get("x-session-id")
+    if not session_id:
+        raise HTTPException(400, "Missing session id")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(EMERGENT_AUTH_SESSION_URL, headers={"X-Session-ID": session_id})
+    except Exception as exc:
+        logger.warning("Emergent auth network failure: %s", type(exc).__name__)
+        raise HTTPException(502, "Auth service unreachable")
+    if r.status_code != 200:
+        raise HTTPException(401, "That sign-in link expired. Please try again.")
+    data = r.json()
+    email = (data.get("email") or "").lower()
+    if not email:
+        raise HTTPException(400, "Google account did not return an email")
+    existing = await db.users.find_one({"email": email}, {"_id": 0})
+    if existing:
+        uid = existing["id"]
+        await db.users.update_one(
+            {"id": uid},
+            {"$set": {"name": data.get("name") or existing.get("name"), "picture": data.get("picture"), "google_id": data.get("id"), "last_login": datetime.now(timezone.utc).isoformat()}},
+        )
+    else:
+        uid = str(uuid.uuid4())
+        await db.users.insert_one({
+            "id": uid,
+            "email": email,
+            "name": data.get("name") or email.split("@")[0],
+            "picture": data.get("picture"),
+            "google_id": data.get("id"),
+            "auth_provider": "google",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "last_login": datetime.now(timezone.utc).isoformat(),
+        })
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    await db.user_sessions.insert_one({
+        "user_id": uid,
+        "session_token": data["session_token"],
+        "expires_at": expires_at,
+        "created_at": datetime.now(timezone.utc),
+    })
+    response.set_cookie(key="session_token", value=data["session_token"], max_age=7 * 24 * 3600, **COOKIE_KWARGS)
+    return {"user": {"id": uid, "email": email, "name": data.get("name"), "picture": data.get("picture")}, "session_token": data["session_token"]}
+
+@router.post("/auth/logout")
+async def logout(request: Request, response: Response):
+    token = request.cookies.get("session_token")
+    auth_h = request.headers.get("authorization") or ""
+    if not token and auth_h.startswith("Bearer "):
+        token = auth_h.split(" ", 1)[1]
+    if token:
+        await db.user_sessions.delete_one({"session_token": token})
+    response.delete_cookie("session_token", path="/")
+    return {"status": "logged_out"}
 
 CLICHES = ["navigate the intricate complexities of", "profound testament to", "in today's fast-paced world", "has taught me that", "journey of self-discovery", "made me who I am today", "at the end of the day", "ever-changing landscape"]
 TRANSITIONS = {"furthermore", "moreover", "in conclusion", "on the other hand", "firstly", "secondly", "therefore", "consequently", "in addition"}

@@ -1,6 +1,8 @@
 import { NavLink, Link, useNavigate, useLocation } from "react-router-dom";
+import axios from "axios";
 import { LogOut } from "lucide-react";
 import Logo from "./Logo";
+import { API } from "../lib/session";
 
 export default function Shell({ children, session, setSession }) {
   const nav = useNavigate();
@@ -34,7 +36,13 @@ export default function Shell({ children, session, setSession }) {
               <button
                 className="ax-logout"
                 data-testid="logout-button"
-                onClick={() => {
+                onClick={async () => {
+                  try {
+                    await axios.post(`${API}/auth/logout`, {}, {
+                      headers: session.token ? { Authorization: `Bearer ${session.token}` } : {},
+                      withCredentials: true,
+                    });
+                  } catch (e) {}
                   setSession(null);
                   nav("/");
                 }}
